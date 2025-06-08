@@ -1,0 +1,253 @@
+"""
+
+VIP视频解析源码。作者邮箱：mytxz666@outlook.com
+作者主页：https://blog.csdn.net/2201_76028616?spm=1000.2115.3001.5343
+链接：[链接](https://blog.csdn.net/2201_76028616?spm=1000.2115.3001.5343)
+
+"""
+
+
+
+import tkinter as tk
+from tkinter import ttk, messagebox, Menu
+import webbrowser
+import threading
+import requests
+import time
+import re
+
+# 主选接口
+MAIN_ROUTE = ("playerjy主选-稳定安全", "https://jx.playerjy.com/?url={}")
+
+# 从网络和历史收集的接口
+ROUTES = [
+    MAIN_ROUTE,
+    ("we-vip", "https://jx.we-vip.com/?url={}"),
+    ("m1907", "https://z1.m1907.top/?jx={}"),
+    ("jsonplayer", "https://jx.jsonplayer.com/player/?url={}"),
+    ("ckplayer_vip", "https://www.ckplayer.vip/jiexi/?url={}"),
+    ("ckplayer", "http://www.ckplayer.tv/kuku/?url={}"),
+    ("guiguiya", "https://api.guiguiya.com/jiexi/vip/?url={}"),
+    ("aa1-cn", "https://api.aa1.cn/analysis/?url={}"),
+    ("baiyug", "http://api.baiyug.vip/index.php?url={}"),
+    ("jx-618g", "http://jx.618g.com/?url={}"),
+    ("jx-92fz", "http://jiexi.92fz.cn/player/vip.php?url={}"),
+    ("jx-071811", "http://jiexi.071811.cc/jx2.php?url={}"),
+    ("jx-lldyy", "http://api.lldyy.net/svip/?url={}"),
+    ("jx-qxkkk", "http://qxkkk.bid/jx/jx.php?url={}"),
+    ("jx-27v9", "http://www.27v9.cn/index.php?url={}"),
+    ("jx-pangujiexi", "https://api.pangujiexi.com/player.php?url={}"),
+    ("jx-kt111", "https://jx.kt111.top/jx/mf/?url={}"),
+    ("beaacc", "http://beaacc.com/api.php?url={}"),
+]
+
+def ping_url(url_tpl):
+    # 劫持简单检测：响应内容中若出现“广告”、“跳转淘宝”、“跳转京东”等关键字，则认为被劫持
+    test_url = url_tpl.format("https://www.bilibili.com")
+    try:
+        start = time.time()
+        resp = requests.get(test_url, timeout=5)
+        latency = int((time.time() - start) * 1000)
+        text = resp.text[:300].lower()
+        if any(x in text for x in ["广告", "taobao", "jd.com", "跳转", "redirect", "404", "not found","403","成人","18岁","色情","AI","人工智能","黄色"]):
+            return latency, True  # 劫持
+        if resp.status_code == 200:
+            return latency, False
+        else:
+            return -1, False
+    except Exception:
+        return -1, False
+
+def is_valid_url(url):
+    # 简单合法性检查
+    pattern = re.compile(r"^(http|https)://[^\s]+$")
+    return bool(pattern.match(url))
+
+class VideoParserApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("多线路智能视频解析器")
+        self.geometry("920x640")
+        self.configure(bg="#f4f7fa")
+        self.resizable(False, False)
+        self.route_status = {}  # 名称: (延迟, 劫持, 状态文本)
+        self.checking = False
+        self.selected_route_index = 0
+        self.create_widgets()
+        self.build_menu()
+        self.check_routes_threaded()
+
+    def build_menu(self):
+        menubar = Menu(self)
+        func_menu = Menu(menubar, tearoff=0)
+        func_menu.add_command(label="刷新所有线路状态", command=self.check_routes_threaded)
+        func_menu.add_separator()
+        func_menu.add_command(label="关于", command=lambda: messagebox.showinfo("关于",
+            "多线路智能视频解析器\n作者: Copilot\n数据来源: 网络聚合, 自动更新接口\n\n仅供学习交流，切勿用于商业用途。"))
+        menubar.add_cascade(label="菜单", menu=func_menu)
+        self.config(menu=menubar)
+
+    def create_widgets(self):
+        style = ttk.Style(self)
+        style.theme_use('clam')
+        style.configure('TButton', font=('微软雅黑', 13), foreground='#fff', background='#0078d7')
+        style.configure('TCombobox', font=('微软雅黑', 12))
+        style.configure('Treeview', font=('微软雅黑', 11), rowheight=28)
+        style.map('TButton', background=[('active', '#005fa3')])
+
+        title_label = tk.Label(self, text="多线路智能视频解析器", font=("微软雅黑", 26, "bold"), bg="#f4f7fa", fg="#0078d7")
+        title_label.pack(pady=(20, 3))
+
+        url_frame = tk.Frame(self, bg="#f4f7fa")
+        url_frame.pack(pady=5)
+        tk.Label(url_frame, text="视频网址：", font=("微软雅黑", 13), bg="#f4f7fa").pack(side='left')
+        self.url_entry = tk.Entry(url_frame, font=("微软雅黑", 13), width=55, relief="groove", bd=2)
+        self.url_entry.pack(side='left', padx=6)
+        self.url_entry.bind("<KeyRelease>", self.validate_url)
+
+        self.url_status_label = tk.Label(self, text="", font=("微软雅黑", 11), bg="#f4f7fa", fg="#e74c3c")
+        self.url_status_label.pack()
+
+        table_frame = tk.Frame(self, bg="#f4f7fa")
+        table_frame.pack(pady=(12, 0), fill='both', expand=False)
+        columns = ("route", "delay", "status")
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=10)
+        self.tree.heading("route", text="解析名称")
+        self.tree.heading("delay", text="延迟(ms)")
+        self.tree.heading("status", text="状态")
+        self.tree.column("route", width=210, anchor="center")
+        self.tree.column("delay", width=110, anchor="center")
+        self.tree.column("status", width=240, anchor="center")
+        self.tree.pack(side='left', fill='y')
+        self.tree.bind("<<TreeviewSelect>>", self.on_table_select)
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side='right', fill='y')
+
+        btn_frame = tk.Frame(self, bg="#f4f7fa")
+        btn_frame.pack(pady=24)
+        self.parse_btn = ttk.Button(btn_frame, text="立即解析并全屏", command=self.parse_video, state='disabled')
+        self.parse_btn.grid(row=0, column=0, padx=10, ipadx=26, ipady=7)
+        self.ping_btn = ttk.Button(btn_frame, text="刷新所有线路状态", command=self.check_routes_threaded)
+        self.ping_btn.grid(row=0, column=1, padx=10, ipadx=18, ipady=7)
+
+        note = tk.Label(self, text="仅供学习交流，切勿用于商业用途", font=("微软雅黑", 10), bg="#f4f7fa", fg="#999")
+        note.pack(side="bottom", pady=6)
+
+        tk.Frame(self, height=2, bd=1, relief="sunken", bg="#e0e4ea").pack(fill="x", padx=24, pady=10)
+
+    def validate_url(self, event=None):
+        url = self.url_entry.get().strip()
+        if not url:
+            self.url_status_label.config(text="")
+            self.parse_btn.config(state='disabled')
+            return
+        if is_valid_url(url):
+            self.url_status_label.config(text="")
+            self.update_parse_btn_state()
+        else:
+            self.url_status_label.config(text="请输入合法的视频网址 (需 http/https 开头)")
+            self.parse_btn.config(state='disabled')
+
+    def on_table_select(self, event=None):
+        selected = self.tree.selection()
+        if selected:
+            idx = int(selected[0])
+            self.selected_route_index = idx
+        self.update_parse_btn_state()
+
+    def update_parse_btn_state(self):
+        url = self.url_entry.get().strip()
+        if not is_valid_url(url):
+            self.parse_btn.config(state='disabled')
+            return
+        route_label, _ = ROUTES[self.selected_route_index]
+        latency, hijack, status = self.route_status.get(route_label, ("", False, "检测中..."))
+        if latency == -1 or (latency != "" and latency > 5000) or hijack:
+            self.parse_btn.config(state='disabled')
+        elif self.checking:
+            self.parse_btn.config(state='disabled')
+        else:
+            self.parse_btn.config(state='normal')
+
+    def check_routes_threaded(self):
+        if self.checking:
+            return
+        self.checking = True
+        self.parse_btn.config(state='disabled')
+        self.ping_btn.config(text="检测中...", state="disabled")
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+        for idx, (name, tpl) in enumerate(ROUTES):
+            self.tree.insert('', 'end', iid=str(idx), values=(name, "检测中...", "检测中..."))
+        self.update_idletasks()
+
+        def worker():
+            route_status_tmp = {}
+            threads = {}
+            def check_one(name, tpl, idx):
+                latency, hijack = ping_url(tpl)
+                if hijack:
+                    route_status_tmp[name] = (latency, hijack, "不安全，检测到网站劫持！")
+                elif latency == -1 or latency > 5000:
+                    route_status_tmp[name] = (-1, False, "故障，请联系管理员")
+                else:
+                    route_status_tmp[name] = (latency, False, "可用")
+                self.after(0, self.update_table_row, idx, name, latency, hijack)
+
+            for idx, (name, tpl) in enumerate(ROUTES):
+                t = threading.Thread(target=check_one, args=(name, tpl, idx))
+                t.daemon = True
+                t.start()
+                threads[name] = t
+            for t in threads.values():
+                t.join()
+            self.route_status = route_status_tmp
+            self.checking = False
+            self.after(0, self._ping_update_ui)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def update_table_row(self, idx, name, latency, hijack):
+        if hijack:
+            delay_str = str(latency) if latency > 0 else "-"
+            status = "不安全，谨慎访问！"
+            color = "#e67e22"
+        elif latency == -1 or latency > 18888:
+            delay_str = "-"
+            status = "故障，请联系管理员"
+            color = "#e74c3c"
+        else:
+            delay_str = str(latency)
+            status = "可用"
+            color = "#27ae60" if latency < 1000 else "#f39c12"
+        self.tree.item(str(idx), values=(name, delay_str, status))
+        self.tree.tag_configure(name, background="#f8f4fa" if idx % 2 == 0 else "#f4f7fa", foreground=color)
+        self.tree.item(str(idx), tags=(name,))
+        self.update_parse_btn_state()
+
+    def _ping_update_ui(self):
+        self.ping_btn.config(text="刷新所有线路状态", state="normal")
+        self.tree.selection_set(str(self.selected_route_index))
+        self.tree.focus(str(self.selected_route_index))
+        self.update_parse_btn_state()
+
+    def parse_video(self):
+        url = self.url_entry.get().strip()
+        if not is_valid_url(url):
+            messagebox.showwarning("提示", "请输入合法的视频网址！")
+            return
+        route_label, route_tpl = ROUTES[self.selected_route_index]
+        latency, hijack, status = self.route_status.get(route_label, ("", False, ""))
+        if latency == -1 or (latency != "" and latency > 5000) or hijack:
+            messagebox.showerror("线路不可用", f"当前线路不可用或不安全（{status}），请选择其他线路。")
+            return
+        final_url = route_tpl.format(url)
+        try:
+            webbrowser.open(final_url, new=2)
+        except Exception as e:
+            messagebox.showerror("打开失败", str(e))
+
+if __name__ == "__main__":
+    app = VideoParserApp()
+    app.mainloop()
